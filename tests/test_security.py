@@ -1,25 +1,42 @@
+import os
+
 import pytest
-import asyncio
-from fastapi import HTTPException
+from fastapi.testclient import TestClient
 
-from app.config import get_settings
-from app.security import require_lead_key
+os.environ["LEAD_ACCESS_KEY"] = "test-secret"
 
-
-@pytest.fixture(autouse=True)
-def configured_key(monkeypatch):
-    monkeypatch.setenv("LEAD_ACCESS_KEY", "test-secret")
-    get_settings.cache_clear()
-    yield
-    get_settings.cache_clear()
+from app.main import app
 
 
-@pytest.mark.parametrize("key", [None, "wrong"])
-def test_missing_or_wrong_key_is_unauthorized(key):
-    with pytest.raises(HTTPException) as error:
-        asyncio.run(require_lead_key(key))
-    assert error.value.status_code == 401
+client = TestClient(app)
+
+
+def test_missing_key_is_unauthorized():
+    response = client.get("/protected")
+    assert response.status_code == 401
+
+
+def test_wrong_key_is_unauthorized():
+    response = client.get("/protected", headers={"X-Lead-Key": "wrong"})
+    assert response.status_code == 401
 
 
 def test_correct_key_is_allowed():
-    assert asyncio.run(require_lead_key("test-secret")) is None
+    response = client.get("/protected", headers={"X-Lead-Key": "test-secret"})
+    assert response.status_code == 200
+
+
+def test_cors_preflight_allows_api_headers():
+    response = client.options(
+        "/protected",
+        headers={
+            "Origin": "http://localhost:5173",
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "X-Lead-Key, ngrok-skip-browser-warning",
+        },
+    )
+
+    assert response.status_code == 200
+    allowed_headers = response.headers["access-control-allow-headers"].lower()
+    assert "x-lead-key" in allowed_headers
+    assert "ngrok-skip-browser-warning" in allowed_headers
