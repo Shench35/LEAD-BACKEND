@@ -1,15 +1,18 @@
 import asyncio
+import hashlib
 import time
 
 import pytest
 from fastapi.testclient import TestClient
 
-from app import db, main, worker
+from app import db, main, security, worker
+from app.config import Settings
 
 
 @pytest.fixture
 def api_client(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "jobs.sqlite3")
+    security.reset_rate_limits()
 
     async def no_warmup():
         return None
@@ -26,6 +29,7 @@ def api_client(tmp_path, monkeypatch):
     with TestClient(main.app) as client:
         yield client
     worker.jobs.clear()
+    security.reset_rate_limits()
 
 
 @pytest.mark.parametrize(
@@ -113,3 +117,103 @@ def test_worker_processes_jobs_one_at_a_time(api_client, monkeypatch):
 
     assert statuses == ["done", "done", "done"]
     assert highest_parallel == 1
+
+
+def test_email_limit_is_hashed_and_limited_without_stopping_results(api_client, monkeypatch):
+    settings = Settings(
+        lead_access_key="test-access-key",
+        email_enabled=True,
+        email_hash_salt="test-salt",
+        per_email_per_day=1,
+    )
+    monkeypatch.setattr(worker, "get_settings", lambda: settings)
+    attempts = []
+
+    async def fake_send(email, role, location, results, send_settings):
+        attempts.append(email)
+        return True
+
+    monkeypatch.setattr(worker.mailer, "send_email", fake_send)
+
+    statuses = []
+    for _ in range(2):
+        response = api_client.post(
+            "/jobs",
+            headers={"X-Lead-Key": "test-access-key"},
+            json={"role": "software", "location": "Lagos", "email": "Student@Gmail.com"},
+        )
+        assert response.status_code == 202
+        job_id = response.json()["job_id"]
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            result = api_client.get(
+                f"/jobs/{job_id}", headers={"X-Lead-Key": "test-access-key"}
+            ).json()
+            if result["status"] == "done" and result["email_status"] != "none":
+                break
+            time.sleep(0.01)
+        assert result["status"] == "done"
+        assert result["results"]
+        statuses.append(result["email_status"])
+        assert worker.jobs[job_id].request.email is None
+
+    assert statuses == ["sent", "skipped"]
+    assert attempts == ["Student@gmail.com"]
+    email_hash = hashlib.sha256(b"test-saltstudent@gmail.com").hexdigest()
+    connection = db.connect()
+    try:
+        rows = connection.execute("SELECT email_hash FROM email_sends").fetchall()
+    finally:
+        connection.close()
+    assert [row["email_hash"] for row in rows] == [email_hash]
+    assert "Student@gmail.com" not in db.DB_PATH.read_bytes().decode("latin-1")
+
+
+def test_email_send_failure_keeps_job_done(api_client, monkeypatch):
+    monkeypatch.setattr(
+        worker,
+        "get_settings",
+        lambda: Settings(
+            lead_access_key="test-access-key",
+            email_enabled=True,
+            email_hash_salt="test-salt",
+        ),
+    )
+
+    async def fail_send(*args, **kwargs):
+        return False
+
+    monkeypatch.setattr(worker.mailer, "send_email", fail_send)
+    response = api_client.post(
+        "/jobs",
+        headers={"X-Lead-Key": "test-access-key"},
+        json={"role": "software", "location": "Lagos", "email": "student@gmail.com"},
+    )
+    job_id = response.json()["job_id"]
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        result = api_client.get(
+            f"/jobs/{job_id}", headers={"X-Lead-Key": "test-access-key"}
+        ).json()
+        if result["status"] == "done" and result["email_status"] == "failed":
+            break
+        time.sleep(0.01)
+    assert result["status"] == "done"
+    assert result["results"]
+    assert result["email_status"] == "failed"
+
+
+def test_ip_job_limit_returns_rate_limit_code(api_client, monkeypatch):
+    settings = Settings(lead_access_key="test-access-key", per_ip_jobs_per_hour=2)
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+    statuses = []
+    for _ in range(3):
+        response = api_client.post(
+            "/jobs",
+            headers={"X-Lead-Key": "test-access-key"},
+            json={"role": "software", "location": "Lagos"},
+        )
+        statuses.append(response.status_code)
+        if response.status_code == 429:
+            assert response.json()["code"] == "rate_limit"
+    assert statuses == [202, 202, 429]

@@ -4,7 +4,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from app import ranker, search
+from app import db, mailer, ranker, search
+from app.config import get_settings
 from app.models import JobRequest
 
 JOB_TTL_SECONDS = 24 * 60 * 60
@@ -121,3 +122,35 @@ async def _process_job(job: Job) -> None:
         job.ranked = False
         job.results = results
     job.status = "done"
+    await _send_job_email(job)
+
+
+async def _send_job_email(job: Job) -> None:
+    email = job.request.email
+    settings = get_settings()
+    try:
+        if email is None or not settings.email_enabled:
+            return
+        if not settings.email_hash_salt:
+            job.email_status = "failed"
+            return
+        email_hash = mailer.hash_email(str(email), settings.email_hash_salt)
+        if db.email_send_count(email_hash) >= settings.per_email_per_day:
+            job.email_status = "skipped"
+            return
+        sent = await mailer.send_email(
+            str(email),
+            job.request.role,
+            job.request.location,
+            job.results or [],
+            settings,
+        )
+        if sent:
+            db.record_email_send(email_hash)
+            job.email_status = "sent"
+        else:
+            job.email_status = "failed"
+    except Exception:
+        job.email_status = "failed"
+    finally:
+        job.request.email = None

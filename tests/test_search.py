@@ -99,3 +99,12 @@ def test_fixture_mode_never_constructs_http_client(isolated_database, monkeypatc
 
     assert len(results) >= 3
     assert "Data" in results[0]["title"]
+
+
+def test_electronics_role_selects_networking_fixture(isolated_database):
+    results = search.search_leads(
+        "electronics", "Lagos", settings=Settings(lead_access_key="test")
+    )
+
+    assert results[0]["title"] == "Network Operations SIWES Student"
+    assert any("Electronics Engineering Internship" in result["title"] for result in results)

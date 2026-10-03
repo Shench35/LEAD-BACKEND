@@ -34,6 +34,7 @@ def initialize_database() -> None:
                 sent_at TEXT NOT NULL
             )"""
         )
+    purge_expired_email_sends()
 
 
 def get_cached_search(cache_key: str, *, now: datetime | None = None) -> list[dict[str, Any]] | None:
@@ -87,3 +88,29 @@ def increment_monthly_searches(*, year_month: str | None = None) -> int:
             "SELECT count FROM monthly_searches WHERE year_month = ?", (month,)
         ).fetchone()
         return int(row["count"])
+
+
+def purge_expired_email_sends(*, now: datetime | None = None) -> None:
+    cutoff = (now or datetime.now(UTC)) - timedelta(hours=48)
+    with connect() as connection:
+        connection.execute("DELETE FROM email_sends WHERE sent_at < ?", (cutoff.isoformat(),))
+
+
+def email_send_count(email_hash: str, *, now: datetime | None = None) -> int:
+    current = now or datetime.now(UTC)
+    day_start = current.replace(hour=0, minute=0, second=0, microsecond=0)
+    with connect() as connection:
+        row = connection.execute(
+            "SELECT COUNT(*) AS count FROM email_sends WHERE email_hash = ? AND sent_at >= ?",
+            (email_hash, day_start.isoformat()),
+        ).fetchone()
+        return int(row["count"])
+
+
+def record_email_send(email_hash: str, *, sent_at: datetime | None = None) -> None:
+    timestamp = (sent_at or datetime.now(UTC)).isoformat()
+    with connect() as connection:
+        connection.execute(
+            "INSERT INTO email_sends (email_hash, sent_at) VALUES (?, ?)",
+            (email_hash, timestamp),
+        )

@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -24,6 +24,12 @@ class Settings(BaseSettings):
     per_email_per_day: int = 3
     trust_forwarded_for: bool = False
     email_hash_salt: str | None = None
+
+    @model_validator(mode="after")
+    def email_requires_hash_salt(self) -> "Settings":
+        if self.email_enabled and not self.email_hash_salt:
+            raise ValueError("EMAIL_HASH_SALT is required when email is enabled.")
+        return self
 
     @property
     def cors_origins(self) -> list[str]:

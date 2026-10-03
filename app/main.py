@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
 import httpx
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Response
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -11,7 +11,7 @@ from app.config import get_settings
 from app import db, worker
 from app.db import initialize_database
 from app.models import JobRequest
-from app.security import require_lead_key
+from app.security import allow_ip_job, client_ip, require_lead_key
 
 settings = get_settings()
 _warmup_task: asyncio.Task[None] | None = None
@@ -88,7 +88,14 @@ async def health() -> dict[str, object]:
 
 
 @jobs_api.post("/jobs", status_code=202)
-async def create_job(request: JobRequest) -> Response:
+async def create_job(request: JobRequest, http_request: Request) -> Response:
+    active_settings = get_settings()
+    ip = client_ip(http_request, trust_forwarded_for=active_settings.trust_forwarded_for)
+    if not allow_ip_job(ip, active_settings.per_ip_jobs_per_hour):
+        return JSONResponse(
+            status_code=429,
+            content={"code": "rate_limit", "message": "Too many searches. Please try again later."},
+        )
     try:
         job = worker.enqueue(request)
     except OverflowError:
