@@ -1,9 +1,5 @@
-import os
-
 import pytest
 from fastapi.testclient import TestClient
-
-os.environ["LEAD_ACCESS_KEY"] = "test-secret"
 
 from app.main import app
 
@@ -22,7 +18,7 @@ def test_wrong_key_is_unauthorized():
 
 
 def test_correct_key_is_allowed():
-    response = client.get("/protected", headers={"X-Lead-Key": "test-secret"})
+    response = client.get("/protected", headers={"X-Lead-Key": "test-access-key"})
     assert response.status_code == 200
 
 
