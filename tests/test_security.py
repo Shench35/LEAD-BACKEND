@@ -1,30 +1,41 @@
-import pytest
 from fastapi.testclient import TestClient
+import pytest
 
-from app.main import app
+from app import main
+
+PAYLOAD = {"role": "software engineering", "location": "Lagos"}
 
 
-client = TestClient(app)
+@pytest.fixture
+def client(monkeypatch):
+    async def no_warmup():
+        return None
+
+    monkeypatch.setattr(main, "warm_ollama", no_warmup)
+    with TestClient(main.app) as test_client:
+        yield test_client
 
 
-def test_missing_key_is_unauthorized():
-    response = client.get("/protected")
+def test_missing_key_is_unauthorized(client):
+    response = client.post("/jobs", json=PAYLOAD)
     assert response.status_code == 401
 
 
-def test_wrong_key_is_unauthorized():
-    response = client.get("/protected", headers={"X-Lead-Key": "wrong"})
+def test_wrong_key_is_unauthorized(client):
+    response = client.post("/jobs", json=PAYLOAD, headers={"X-Lead-Key": "wrong"})
     assert response.status_code == 401
 
 
-def test_correct_key_is_allowed():
-    response = client.get("/protected", headers={"X-Lead-Key": "test-access-key"})
-    assert response.status_code == 200
+def test_correct_key_is_allowed(client):
+    response = client.post(
+        "/jobs", json=PAYLOAD, headers={"X-Lead-Key": "test-access-key"}
+    )
+    assert response.status_code == 202
 
 
-def test_cors_preflight_allows_api_headers():
+def test_cors_preflight_allows_api_headers(client):
     response = client.options(
-        "/protected",
+        "/jobs",
         headers={
             "Origin": "http://localhost:5173",
             "Access-Control-Request-Method": "GET",
