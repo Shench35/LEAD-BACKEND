@@ -2,20 +2,26 @@ import asyncio
 import json
 
 import pytest
+import httpx
 
 from app.config import Settings
 from app.ranker import InvalidRanking, rank_results, validate_ranking
 
 
-def test_validation_rejects_unknown_and_duplicate_ids_and_strips_urls():
+def test_validation_drops_unknown_and_duplicate_ids_and_rejects_empty_output():
+    ranked = validate_ranking(
+        '{"ranked":[{"id":9,"fit_score":4,"reason":"unknown","tip":"drop"},'
+        '{"id":1,"fit_score":4,"reason":"keep first","tip":"apply"},'
+        '{"id":1,"fit_score":3,"reason":"drop duplicate","tip":"skip"}]}',
+        {1},
+    )
+    assert [item.id for item in ranked] == [1]
+    assert ranked[0].reason == "keep first"
+
     with pytest.raises(InvalidRanking):
-        validate_ranking('{"ranked":[{"id":9,"fit_score":4,"reason":"ok","tip":"apply"}]}', {1})
+        validate_ranking('{"ranked":[]}', {1})
     with pytest.raises(InvalidRanking):
-        validate_ranking(
-            '{"ranked":[{"id":1,"fit_score":4,"reason":"ok","tip":"a"},'
-            '{"id":1,"fit_score":3,"reason":"ok","tip":"b"}]}',
-            {1},
-        )
+        validate_ranking('{"ranked":[{"id":9,"fit_score":4,"reason":"x","tip":"y"}]}', {1})
 
     ranked = validate_ranking(
         '{"ranked":[{"id":1,"fit_score":8,"reason":"Apply at https://jobs.example.ng/now",'
@@ -94,3 +100,60 @@ def test_merge_uses_only_search_links_and_model_receives_no_links():
     model_input = client.calls[0]["json"]["messages"][1]["content"]
     assert "link" not in model_input
     assert "Python" in model_input
+    assert client.calls[0]["json"]["options"]["num_predict"] == 600
+    assert "12 words maximum" in client.calls[0]["json"]["messages"][0]["content"]
+
+
+def test_rank_merge_sorts_scored_results_and_marks_unranked_results_null():
+    results = [
+        {"id": 1, "title": "One", "link": "https://one.example", "snippet": ""},
+        {"id": 2, "title": "Two", "link": "https://two.example", "snippet": ""},
+        {"id": 3, "title": "Three", "link": "https://three.example", "snippet": ""},
+    ]
+    client = StubOllama([
+        '{"ranked":['
+        '{"id":2,"fit_score":3,"reason":"Three","tip":"Review"},'
+        '{"id":1,"fit_score":5,"reason":"Five","tip":"Apply"}]}'
+    ])
+
+    ranked, output = asyncio.run(
+        rank_results("software", "Lagos", results, settings=Settings(lead_access_key="test"), client=client)
+    )
+
+    assert ranked is True
+    assert [result["id"] for result in output] == [1, 2, 3]
+    assert [result["fit_score"] for result in output] == [5, 3, None]
+    assert output[2]["reason"] is None
+    assert output[2]["tip"] is None
+
+
+def test_node_js_is_not_treated_as_a_domain():
+    ranked = validate_ranking(
+        '{"ranked":[{"id":1,"fit_score":4,"reason":"Node.js and Python",'
+        '"tip":"Use Node.js basics"}]}',
+        {1},
+    )
+
+    assert ranked[0].reason == "Node.js and Python"
+    assert ranked[0].tip == "Use Node.js basics"
+
+
+@pytest.mark.parametrize("error", [httpx.ReadTimeout("timed out"), httpx.ConnectError("offline")])
+def test_transport_errors_fall_back_without_retry(error):
+    class OfflineOllama:
+        def __init__(self):
+            self.calls = 0
+
+        async def post(self, *args, **kwargs):
+            self.calls += 1
+            raise error
+
+    results = [{"id": 1, "title": "Placement", "link": "https://real.example/", "snippet": "SIWES"}]
+    client = OfflineOllama()
+    ranked, output = asyncio.run(
+        rank_results("software", "Lagos", results, settings=Settings(lead_access_key="test"), client=client)
+    )
+
+    assert ranked is False
+    assert output == results
+    assert client.calls == 1

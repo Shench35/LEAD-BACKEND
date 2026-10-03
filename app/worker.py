@@ -9,7 +9,7 @@ from app.config import get_settings
 from app.models import JobRequest
 
 JOB_TTL_SECONDS = 24 * 60 * 60
-MAX_WAITING_JOBS = 10
+MAX_WAITING_JOBS = 4
 
 
 @dataclass

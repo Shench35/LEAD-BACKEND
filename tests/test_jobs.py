@@ -9,6 +9,10 @@ from app import db, main, security, worker
 from app.config import Settings
 
 
+def test_waiting_queue_limit_is_four():
+    assert worker.MAX_WAITING_JOBS == 4
+
+
 @pytest.fixture
 def api_client(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "jobs.sqlite3")
@@ -154,6 +158,7 @@ def test_email_limit_is_hashed_and_limited_without_stopping_results(api_client, 
             time.sleep(0.01)
         assert result["status"] == "done"
         assert result["results"]
+        assert "email" not in result
         statuses.append(result["email_status"])
         assert worker.jobs[job_id].request.email is None
 
